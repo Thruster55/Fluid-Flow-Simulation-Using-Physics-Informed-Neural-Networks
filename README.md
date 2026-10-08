@@ -161,7 +161,81 @@ Epoch:  900 | Total Loss: 3.4285e-01 | PDE Residual: 7.3499e-02 | BC Loss: 2.693
 Epoch: 1000 | Total Loss: 3.3690e-01 | PDE Residual: 6.9892e-02 | BC Loss: 2.6701e-02
 ```
 
+## Phase 3: Hybrid PINN Training, Validation, and Ground-Truth Benchmarking
 
+This stage couples data-driven supervision from high-fidelity OpenFOAM simulations with physical conservation laws to accelerate convergence and constrain the learned solution space. The execution pipeline, quantitative validation, error calculation, and model checkpointing are handled in:
+
+`Training_Validation_Comparison.m`
+
+---
+
+### 1. Hybrid Loss Formulation & Collocation Grid
+
+Rather than training purely as a black-box regression model or purely on unanchored physics residuals, the optimization objective balances empirical target fields with governing differential equations across the physical domain $\Omega = [0.0, 2.0] \times [-0.5, 0.5]\ \text{m}$.
+
+The composite objective function is formulated as:
+
+$$\mathcal{L}_{\text{total}} = w_{\text{data}} \mathcal{L}_{\text{data}} + w_{\text{pde}} \mathcal{L}_{\text{pde}}$$
+
+where:
+- $w_{\text{data}} = 10.0$ (supervised empirical anchor)
+- $w_{\text{pde}} = 1.0$ (Navier–Stokes physical regularizer)
+- $\nu = 0.01\ \text{m}^{2}/\text{s}$ (kinematic viscosity)
+
+#### Empirical Data Loss ($\mathcal{L}_{\text{data}}$)
+Measures the mean squared error (MSE) between network predictions $\hat{\mathbf{Y}} = [\hat{u}, \hat{v}, \hat{p}]^{T}$ and normalized OpenFOAM CFD ground-truth target values $\mathbf{Y} = [u^{\ast}, v^{\ast}, p^{\ast}]^{T}$:
+
+$$\mathcal{L}_{\text{data}} = \frac{1}{N} \sum_{i=1}^{N} \left( (\hat{u}_{i} - u_{i}^{\ast})^{2} + (\hat{v}_{i} - v_{i}^{\ast})^{2} + (\hat{p}_{i} - p_{i}^{\ast})^{2} \right)$$
+
+#### Physics Residual Loss ($\mathcal{L}_{\text{pde}}$)
+Evaluates governing incompressible 2D Navier–Stokes residuals across domain collocation points via automatic differentiation (`dlgradient`):
+
+$$\mathcal{L}_{\text{pde}} = \frac{1}{N} \sum_{i=1}^{N} \left( \vert{}e_{\text{cont}, i}\vert{}^{2} + \vert{}e_{\text{mom}, x, i}\vert{}^{2} + \vert{}e_{\text{mom}, y, i}\vert{}^{2} \right)$$
+
+where:
+
+$$e_{\text{cont}} = \frac{\partial u}{\partial x} + \frac{\partial v}{\partial y}$$
+
+$$e_{\text{mom}, x} = \left( u \frac{\partial u}{\partial x} + v \frac{\partial u}{\partial y} \right) + \frac{\partial p}{\partial x} - \nu \left( \frac{\partial^{2} u}{\partial x^{2}} + \frac{\partial^{2} u}{\partial y^{2}} \right)$$
+
+$$e_{\text{mom}, y} = \left( u \frac{\partial v}{\partial x} + v \frac{\partial v}{\partial y} \right) + \frac{\partial p}{\partial y} - \nu \left( \frac{\partial^{2} v}{\partial x^{2}} + \frac{\partial^{2} v}{\partial y^{2}} \right)$$
+
+---
+
+### 2. Validation Metric: Relative $L_2$ Error Norm
+
+Generalization is tracked across training epochs against an unseen hold-out validation slice $\mathbf{Y}_{\text{val}}$ using the relative $L_{2}$ error norm:
+
+$$\text{Rel } L_{2} = \frac{\Vert{} \hat{\mathbf{Y}} - \mathbf{Y}_{\text{val}} \Vert{}_{2}}{\Vert{} \mathbf{Y}_{\text{val}} \Vert{}_{2}} = \frac{\sqrt{\sum_{i=1}^{N} \Vert{} \hat{\mathbf{y}}_{i} - \mathbf{y}_{\text{val}, i} \Vert{}^{2}}}{\sqrt{\sum_{i=1}^{N} \Vert{} \mathbf{y}_{\text{val}, i} \Vert{}^{2}}}$$
+
+---
+
+### 3. Optimization Setup & Training Log
+
+The network is optimized over 1500 epochs using the Adam algorithm (`adamupdate`) with an initial learning rate $\alpha = 10^{-3}$. Metrics are recorded every 50 epochs.
+
+#### Training Progression Log
+```text
+Beginning combined Data + Navier-Stokes PINN Training...
+Epoch:    1 | Total Loss: 1.1426e+00 | Data Loss: 9.6686e-02 | PDE Residual: 1.7578e-01 | Val Rel L2: 5.3461e-01
+Epoch:   50 | Total Loss: 3.7650e-02 | Data Loss: 3.5542e-03 | PDE Residual: 2.1082e-03 | Val Rel L2: 1.6639e-01
+Epoch:  100 | Total Loss: 3.2665e-02 | Data Loss: 3.1724e-03 | PDE Residual: 9.4130e-04 | Val Rel L2: 1.6446e-01
+Epoch:  200 | Total Loss: 3.1082e-02 | Data Loss: 3.0529e-03 | PDE Residual: 5.5287e-04 | Val Rel L2: 1.6363e-01
+Epoch:  300 | Total Loss: 3.0562e-02 | Data Loss: 3.0088e-03 | PDE Residual: 4.7399e-04 | Val Rel L2: 1.6320e-01
+Epoch:  400 | Total Loss: 3.0345e-02 | Data Loss: 2.9896e-03 | PDE Residual: 4.4854e-04 | Val Rel L2: 1.6287e-01
+Epoch:  500 | Total Loss: 3.0221e-02 | Data Loss: 2.9784e-03 | PDE Residual: 4.3748e-04 | Val Rel L2: 1.6255e-01
+Epoch:  600 | Total Loss: 3.0115e-02 | Data Loss: 2.9682e-03 | PDE Residual: 4.3201e-04 | Val Rel L2: 1.6218e-01
+Epoch:  700 | Total Loss: 2.9992e-02 | Data Loss: 2.9556e-03 | PDE Residual: 4.3525e-04 | Val Rel L2: 1.6169e-01
+Epoch:  800 | Total Loss: 2.9830e-02 | Data Loss: 2.9388e-03 | PDE Residual: 4.4201e-04 | Val Rel L2: 1.6116e-01
+Epoch:  900 | Total Loss: 3.3509e-02 | Data Loss: 3.2336e-03 | PDE Residual: 1.1732e-03 | Val Rel L2: 1.6490e-01
+Epoch: 1000 | Total Loss: 2.9287e-02 | Data Loss: 2.8746e-03 | PDE Residual: 5.4141e-04 | Val Rel L2: 1.5929e-01
+Epoch: 1100 | Total Loss: 3.4414e-02 | Data Loss: 3.2629e-03 | PDE Residual: 1.7851e-03 | Val Rel L2: 1.7018e-01
+Epoch: 1200 | Total Loss: 2.7567e-02 | Data Loss: 2.6785e-03 | PDE Residual: 7.8218e-04 | Val Rel L2: 1.5407e-01
+Epoch: 1300 | Total Loss: 2.6984e-02 | Data Loss: 2.5296e-03 | PDE Residual: 1.6876e-03 | Val Rel L2: 1.4784e-01
+Epoch: 1400 | Total Loss: 2.5513e-02 | Data Loss: 2.3622e-03 | PDE Residual: 1.8905e-03 | Val Rel L2: 1.4488e-01
+Epoch: 1500 | Total Loss: 2.5087e-02 | Data Loss: 2.3234e-03 | PDE Residual: 1.8530e-03 | Val Rel L2: 1.4366e-01
+
+Model successfully saved to: ./PINN_Trained_Model.mat
 
 
 
